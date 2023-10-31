@@ -5,8 +5,10 @@ import scipy.sparse as sp_sparse
 from do_mpc.differentiator._nlpdifferentiator import NLPDifferentiator, DoMPCDifferentiator
 
 class NLPDifferentiator_SecondOrder(NLPDifferentiator):
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
 
     def _get_size_metrics(self):
         
@@ -23,6 +25,7 @@ class NLPDifferentiator_SecondOrder(NLPDifferentiator):
             self.n_x_unreduced = self.nlp_unreduced["x"].shape[0]
             self.n_p_unreduced = self.nlp_unreduced["p"].shape[0]
 
+
     def _prepare_differentiator(self):
         super()._prepare_differentiator()
         self.status.prepare_first_order_differentiator = True
@@ -30,75 +33,116 @@ class NLPDifferentiator_SecondOrder(NLPDifferentiator):
         # 7. Get symbolic expressions for second order sensitivity matrices
         self._prepare_second_order_sensitivity_matrices()
 
+
+
     def _prepare_second_order_sensitivity_matrices(self):
+        """
+        Computes the second-order sensitivity matrices for the Reinforcement Learning-based DoMPCDifferentiator object.
+        This method calls the _get_C_matrices method and sets the status.sym_KKT_system attribute to True.
+        """
         self._get_C_matrices()
         self.status.sym_KKT_system = True
+
     
     def _get_C_matrices(self):
-        first_order_sensitivities = cd.SX.sym("first_order_sensitivities", (self.n_z, self.n_p))
+            """
+            Computes a symbolic expression and function for the C matrix of the RHS to compute the second order sensitivity matrix.
+            For more information see here Theorem 1. # NOTE: Add out paper
 
-        p = self.nlp["p"]
-        z = self.nlp["z"]
-        C = []
-        for idx_p in range(self.n_p):
-            A_2 = cd.reshape(cd.jacobian(self.A_sym, p[idx_p]), self.A_sym.shape)
-            
-            sens_row = first_order_sensitivities[:, idx_p]
-            A_1 = []
-            for idx_z in range(self.n_z):
-                # NOTE: This is horribly slow. Double check if the expression can be simplified due to some differentiation rules (reversing chain rule? product rule?)
-                A_1_col = cd.reshape(cd.jacobian(self.A_sym, z[idx_z]), self.A_sym.shape) @ sens_row
-                A_1.append(A_1_col)
-            A_1 = cd.horzcat(*A_1)
+            Returns:
+            None
+            """
+            first_order_sensitivities = cd.SX.sym("first_order_sensitivities", (self.n_z, self.n_p))
 
-            A = A_1 + A_2
+            p = self.nlp["p"]
+            z = self.nlp["z"]
+            C = []
+            for idx_p in range(self.n_p):
+                A_2 = cd.reshape(cd.jacobian(self.A_sym, p[idx_p]), self.A_sym.shape)
+                
+                sens_row = first_order_sensitivities[:, idx_p]
+                A_1 = []
+                for idx_z in range(self.n_z):
+                    # NOTE: This is horribly slow. Avoid the loop at some future time and take fewer steps on the resulting large matrix by reffering to the submatrix slices.
+                    A_1_col = cd.reshape(cd.jacobian(self.A_sym, z[idx_z]), self.A_sym.shape) @ sens_row
+                    A_1.append(A_1_col)
+                A_1 = cd.horzcat(*A_1)
 
-            B_3 = cd.reshape(cd.jacobian(self.B_sym, p[idx_p]), self.B_sym.shape)
-            
-            B_1 = []
-            for idx_p2 in range(self.n_p):
-                # NOTE: This is horribly slow. Double check if the expression can be simplified due to some differentiation rules (reversing chain rule? product rule?)
-                B_1_col = cd.reshape(cd.jacobian(self.A_sym, p[idx_p2]), self.A_sym.shape) @ sens_row
-                B_1.append(B_1_col)
-            B_1 = cd.horzcat(*B_1)
+                A = A_1 + A_2
 
-            B = B_1 + B_3
+                B_3 = cd.reshape(cd.jacobian(self.B_sym, p[idx_p]), self.B_sym.shape)
+                
+                B_1 = []
+                for idx_p2 in range(self.n_p):
+                    # NOTE: This is horribly slow. Avoid the loop at some future time and take fewer steps on the resulting large matrix by reffering to the submatrix slices.
+                    B_1_col = cd.reshape(cd.jacobian(self.A_sym, p[idx_p2]), self.A_sym.shape) @ sens_row
+                    B_1.append(B_1_col)
+                B_1 = cd.horzcat(*B_1)
 
-            C.append(B + A @ first_order_sensitivities)
-        C = cd.horzcat(*C)
-        self.C_sym = cd.simplify(C)
-        self.C_func = cd.Function("C_func", [z, p, first_order_sensitivities], [self.C_sym], ["z_opt", "p_opt", "first_order_sensitivities"], ["C"])
-        return
+                B = B_1 + B_3
+
+                C.append(B + A @ first_order_sensitivities)
+            C = cd.horzcat(*C)
+            self.C_sym = cd.simplify(C)
+            self.C_func = cd.Function("C_func", [z, p, first_order_sensitivities], [self.C_sym], ["z_opt", "p_opt", "first_order_sensitivities"], ["C"])
+            return
+    
     
     def _get_second_order_sensitivity_matrices(self, z_num: cd.DM, p_num: cd.DM, dz_dp_num: cd.DM):
+        """
+        Computes the second-order sensitivity matrices for the system.
+
+        Args:
+            z_num (cd.DM): Full optimal solution of the last optmization.
+            p_num (cd.DM): Full parameter vector during the last optimization.
+            dz_dp_num (cd.DM): The current sensitivity of the full optimal with respect to the parameters.
+
+        Returns:
+            A_num (cd.DM): Coefficient matrix of the linear system of equations.
+            C_num (cd.DM): Right hand side of the linear system of equations.
+        """
         A_num = self.A_func(z_num, p_num)       
         C_num = self.C_func(z_num, p_num, dz_dp_num)
         return A_num, C_num
 
+
     def _calculate_second_order_sensitivities(self, z_num: cd.DM, p_num: cd.DM, dz_dp_num: cd.DM, where_cons_active: np.ndarray):
-        
-        # returns
-        residuals = None
+            """
+            Calculates the second order sensitivities of the system.
 
-        A_num, C_num = self._get_second_order_sensitivity_matrices(z_num, p_num, dz_dp_num)
-        A_num, C_num = self._reduce_sensitivity_matrices(A_num, C_num, where_cons_active)
+            Args:
+            z_num (cd.DM): Full optimal solution of the last optmization.
+            p_num (cd.DM): Full parameter vector during the last optimization.
+            dz_dp_num (cd.DM): The current sensitivity of the full optimal with respect to the parameters.
+            where_cons_active (np.ndarray): An array indicating which constraints are active.
 
-        if self.settings.check_rank:
-            self._check_rank(A_num)
-
-        try:
-            param_sens = self._solve_linear_system(A_num, C_num, lin_solver=self.settings.lin_solver)
-        # except np.linalg.LinAlgError:
-        except:
-            if self.settings.lstsq_fallback:
-                print("Solving LSE failed. Falling back to least squares solution.")
-                param_sens = self._solve_linear_system(A_num, C_num, lin_solver="lstsq")
-            else:
-                raise np.linalg.LinAlgError("Solving LSE failed.")
+            Returns:
+            param_sens (cd.DM): The second order sensitivities of the system.
+            residuals (cd.DM): The residuals of the system.
+            """
             
-        if self.settings.track_residuals:
-            residuals = self._track_residuals(A_num, C_num, param_sens)
-        return param_sens, residuals
+            # returns
+            residuals = None
+
+            A_num, C_num = self._get_second_order_sensitivity_matrices(z_num, p_num, dz_dp_num)
+            A_num, C_num = self._reduce_sensitivity_matrices(A_num, C_num, where_cons_active)
+
+            if self.settings.check_rank:
+                self._check_rank(A_num)
+
+            try:
+                param_sens = self._solve_linear_system(A_num, C_num, lin_solver=self.settings.lin_solver)
+            # except np.linalg.LinAlgError:
+            except:
+                if self.settings.lstsq_fallback:
+                    print("Solving LSE failed. Falling back to least squares solution.")
+                    param_sens = self._solve_linear_system(A_num, C_num, lin_solver="lstsq")
+                else:
+                    raise np.linalg.LinAlgError("Solving LSE failed.")
+                
+            if self.settings.track_residuals:
+                residuals = self._track_residuals(A_num, C_num, param_sens)
+            return param_sens, residuals
     
     def _remove_unused_sym_vars(self):
         """
@@ -179,16 +223,25 @@ class NLPDifferentiator_SecondOrder(NLPDifferentiator):
         return dx_dp_num, dlam_dp_num, d2x_dp_num2, d2lam_dp_num2
 
     def _convert_to_tensor(self, array: cd.DM) -> np.ndarray:
-        if isinstance(array, cd.DM):
-            array = array.full()
+            """
+            Converts a CasADi DM array to a 3D numpy.ndarray.
 
-        tensor_array = np.empty((array.shape[0], self.n_p_unreduced, self.n_p_unreduced))
-        for idx in range(self.n_p_unreduced):
-            lower = idx*self.n_p_unreduced
-            upper = (idx+1)*self.n_p_unreduced
-            tensor_array[:, :, idx] = array[:, lower:upper]
+            Args:
+                array (cd.DM): The CasADi DM array to be converted.
 
-        return tensor_array
+            Returns:
+                np.ndarray: The converted tensor array.
+            """
+            if isinstance(array, cd.DM):
+                array = array.full()
+
+            tensor_array = np.empty((array.shape[0], self.n_p_unreduced, self.n_p_unreduced))
+            for idx in range(self.n_p_unreduced):
+                lower = idx*self.n_p_unreduced
+                upper = (idx+1)*self.n_p_unreduced
+                tensor_array[:, :, idx] = array[:, lower:upper]
+
+            return tensor_array
     
     def _map_dlamdp(self, param_sens: np.ndarray, where_cons_active: np.ndarray) -> np.ndarray:
         """
@@ -245,6 +298,8 @@ class NLPDifferentiator_SecondOrder(NLPDifferentiator):
         return d2x_dp2_num, d2lam_dp2_num
 
 
+
+
 class DoMPCDifferentiator_RL(DoMPCDifferentiator):
 
     def __init__(self, optimizer, *args, **kwargs):
@@ -252,6 +307,15 @@ class DoMPCDifferentiator_RL(DoMPCDifferentiator):
         # del self.optimizer
     
     def _get_do_mpc_nlp_sol(self, mpc_object):
+        """
+        Returns a dictionary containing the solution of the nonlinear programming problem solved by do-mpc.
+
+        Args:
+            mpc_object: The do-mpc object containing the solution of the nonlinear programming problem.
+
+        Returns:
+            A dictionary containing the solution of the nonlinear programming problem.
+        """
         nlp_sol = {}
         nlp_sol["x"] = cd.vertcat(mpc_object.opt_x_num)
         nlp_sol["x_unscaled"] = cd.vertcat(mpc_object.opt_x_num_unscaled)
@@ -318,14 +382,23 @@ class DoMPCSecondOrderDifferentiator_RL(NLPDifferentiator_SecondOrder):
         return nlp, nlp_bounds
     
     def _get_do_mpc_nlp_sol(self, mpc_object):
-        nlp_sol = {}
-        nlp_sol["x"] = cd.vertcat(mpc_object.opt_x_num)
-        nlp_sol["x_unscaled"] = cd.vertcat(mpc_object.opt_x_num_unscaled)
-        nlp_sol["g"] = cd.vertcat(mpc_object.opt_g_num)
-        nlp_sol["lam_g"] = cd.vertcat(mpc_object.lam_g_num)
-        nlp_sol["lam_x"] = cd.vertcat(mpc_object.lam_x_num)
-        nlp_sol["p"] = cd.vertcat(mpc_object.opt_p_num)
-        return nlp_sol
+            """
+            Returns a dictionary containing the solution of the nonlinear programming problem solved by do-mpc.
+
+            Args:
+                mpc_object: An instance of the do-mpc MPC class.
+
+            Returns:
+                A dictionary containing the solution of the nonlinear programming problem solved by do-mpc.
+            """
+            nlp_sol = {}
+            nlp_sol["x"] = cd.vertcat(mpc_object.opt_x_num)
+            nlp_sol["x_unscaled"] = cd.vertcat(mpc_object.opt_x_num_unscaled)
+            nlp_sol["g"] = cd.vertcat(mpc_object.opt_g_num)
+            nlp_sol["lam_g"] = cd.vertcat(mpc_object.lam_g_num)
+            nlp_sol["lam_x"] = cd.vertcat(mpc_object.lam_x_num)
+            nlp_sol["p"] = cd.vertcat(mpc_object.opt_p_num)
+            return nlp_sol
 
     def differentiate_twice(self, optimizer, convert_to_tensor: bool = True):
         """
